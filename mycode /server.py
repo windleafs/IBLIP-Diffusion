@@ -34,6 +34,15 @@ try:
 except Exception as e:
     app.logger.error(f"模型加载失败: {str(e)}")
 
+# 图像描述模型
+dip_model, dip_vis_processors, _ = load_model_and_preprocess(
+    name="blip_caption", 
+    model_type="base_coco",
+    is_eval=True,
+    device="cuda"
+)
+
+
 def load_models():
     global model, vis_preprocess, txt_preprocess
     if model is None:
@@ -83,50 +92,57 @@ def image_to_image():
     try:
         # 接收文件与参数
         cond_image = request.files['cond_image']
-        src_image = request.files['src_image']
-        data = request.form
+        text_prompt = request.form.get('text_prompt', '').strip()
         
-        # 参数校验
-        required_params = ['text_prompt', 'cond_subject', 'src_subject', 'tgt_subject']
-        if not all(data.get(p) for p in required_params):
-            raise ValueError("Missing required parameters")
-
+        cond_image.stream.seek(0)
         # 处理输入图像
         cond_img = Image.open(cond_image.stream).convert('RGB')
-        src_img = Image.open(src_image.stream).convert('RGB')
 
-        # 预处理流程
-        cond_img = vis_preprocess["eval"](cond_img).unsqueeze(0).cuda()
-        src_subject = txt_preprocess["eval"](data['src_subject'])
-        tgt_subject = txt_preprocess["eval"](data['tgt_subject'])
-        cond_subject = txt_preprocess["eval"](data['cond_subject'])
-        text_prompt = [txt_preprocess["eval"](data['text_prompt'])]
+        processed_img1 = dip_vis_processors["eval"](cond_img).unsqueeze(0).cuda()
 
-        # 构建输入样本
+        # 生成描述文本
+        caption = dip_model.generate({"image": processed_img1})[0]
+
+        # 提取主题关键词
+        theme = " ".join([word for word in caption.split() if word not in ["a", "an", "the"]][:3])
+
+        cond_subject = theme
+        tgt_subject = theme
+
+        cond_subjects = [txt_preprocess["eval"](cond_subject)]
+        tgt_subjects = [txt_preprocess["eval"](tgt_subject)]
+        text_prompt = [txt_preprocess["eval"](text_prompt)]
+
+        cond_images = vis_preprocess["eval"](cond_img).unsqueeze(0).cuda()
         samples = {
-            "cond_images": cond_img,
-            "cond_subject": cond_subject,
-            "src_subject": src_subject,
-            "tgt_subject": tgt_subject,
+            "cond_images": cond_images,
+            "cond_subject": cond_subjects,
+            "tgt_subject": tgt_subjects,
             "prompt": text_prompt,
-            "raw_image": src_img,
         }
 
-        # 调用模型生成
-        output = model.edit(
-            samples,
-            seed=int(data.get('seed', 88871)),
-            guidance_scale=float(data.get('guidance_scale', 7.5)),
-            num_inference_steps=int(data.get('num_steps', 50)),
-            num_inversion_steps=int(data.get('num_inversion_steps', 50)),
-            neg_prompt=data.get('negative_prompt', "")
-        )
+
+        iter_seed = 88888
+        guidance_scale = 7.5
+        num_inference_steps = 50
+        negative_prompt = "over-exposure, under-exposure, saturated, duplicate, out of frame, lowres, cropped, worst quality, low quality, jpeg artifacts, morbid, mutilated, out of frame, ugly, bad anatomy, bad proportions, deformed, blurry, duplicate"
+
+        output = model.generate(
+                samples,
+                seed=iter_seed,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                neg_prompt=negative_prompt,
+                height=512,
+                width=512,
+            )
 
         # 返回生成图像
         img_io = BytesIO()
-        output[1].save(img_io, 'PNG')
+        output[0].save(img_io, 'PNG')
         img_io.seek(0)
-        return send_file(img_io, mimetype='image/png')
+        img_data = base64.b64encode(img_io.getvalue()).decode('utf-8')
+        return jsonify({ "image": f"data:image/png;base64,{img_data}" })
 
     except Exception as e:
         return jsonify(error=str(e)), 400
