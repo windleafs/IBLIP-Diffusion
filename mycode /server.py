@@ -147,5 +147,80 @@ def image_to_image():
     except Exception as e:
         return jsonify(error=str(e)), 400
 
+
+# 图像编辑接口
+@app.route('/mixedimg', methods=['POST'])
+def mixed_spanimage():
+    try:
+        # 接收文件与参数
+        cond_image = request.files['cond_image']
+        src_image = request.files['src_image']
+        text_prompt = request.form.get('text_prompt', '').strip()
+        
+        cond_image.stream.seek(0)
+        src_image.stream.seek(0)
+        # 处理输入图像
+        cond_img = Image.open(cond_image.stream).convert('RGB')
+        src_img = Image.open(src_image.stream).convert('RGB')
+
+        processed_img1 = dip_vis_processors["eval"](cond_img).unsqueeze(0).cuda()
+        processed_img2 = dip_vis_processors["eval"](src_img).unsqueeze(0).cuda()
+
+
+        # 生成描述文本
+        caption = dip_model.generate({"image": processed_img1})[0]
+        caption_src = dip_model.generate({"image": processed_img2})[0]
+
+        # 提取主题关键词
+        theme = " ".join([word for word in caption.split() if word not in ["a", "an", "the"]][:3])
+        theme_src = " ".join([word for word in caption_src.split() if word not in ["a", "an", "the"]][:3])
+
+        cond_subject = theme
+        src_subject = theme_src
+        tgt_subject = theme
+
+        cond_subjects = [txt_preprocess["eval"](cond_subject)]
+        src_subjects = [txt_preprocess["eval"](src_subject)]
+        tgt_subjects = [txt_preprocess["eval"](tgt_subject)]
+        text_prompt = [txt_preprocess["eval"](text_prompt)]
+
+        cond_images = vis_preprocess["eval"](cond_img).unsqueeze(0).cuda()
+        src_images = vis_preprocess["eval"](src_img).unsqueeze(0).cuda()
+        samples = {
+            "cond_images": cond_images,
+            "cond_subject": cond_subjects,
+            "src_subject": src_subjects,
+            "tgt_subject": tgt_subjects,
+            "prompt": text_prompt,
+            "raw_image": src_images,
+        }
+
+
+        iter_seed = 88888
+        guidance_scale = 7.5
+        num_inference_steps = 50
+        negative_prompt = "over-exposure, under-exposure, saturated, duplicate, out of frame, lowres, cropped, worst quality, low quality, jpeg artifacts, morbid, mutilated, out of frame, ugly, bad anatomy, bad proportions, deformed, blurry, duplicate"
+
+        output = model.generate(
+                samples,
+                seed=iter_seed,
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                neg_prompt=negative_prompt,
+                height=512,
+                width=512,
+            )
+
+        # 返回生成图像
+        img_io = BytesIO()
+        output[0].save(img_io, 'PNG')
+        img_io.seek(0)
+        img_data = base64.b64encode(img_io.getvalue()).decode('utf-8')
+        return jsonify({ "image": f"data:image/png;base64,{img_data}" })
+
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
